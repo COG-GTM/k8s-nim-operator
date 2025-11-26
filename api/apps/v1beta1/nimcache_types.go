@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package v1alpha1
+package v1beta1
 
 import (
 	"fmt"
@@ -26,9 +26,6 @@ import (
 
 	"github.com/NVIDIA/k8s-nim-operator/internal/k8sutil"
 )
-
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // NIMCacheSpec defines the desired state of NIMCache.
 type NIMCacheSpec struct {
@@ -46,11 +43,6 @@ type NIMCacheSpec struct {
 	UserID *int64 `json:"userID,omitempty"`
 	// GroupID is the group ID for the caching job
 	GroupID *int64 `json:"groupID,omitempty"`
-	// CertConfig is the name of the ConfigMap containing the custom certificates.
-	// for secure communication.
-	// Deprecated: use `Proxy` instead to configure custom certificates for using proxy.
-	// +optional
-	CertConfig *CertConfig `json:"certConfig,omitempty"`
 	// Env are the additional custom environment variabes for the caching job
 	Env []corev1.EnvVar `json:"env,omitempty"`
 	// RuntimeClassName is the runtimeclass for the caching job
@@ -155,13 +147,10 @@ type GPUSpec struct {
 }
 
 // NIMCacheStorage defines the attributes of various storage targets used to store the model.
+// Note: HostPath storage option has been removed in v1beta1. Use PVC instead.
 type NIMCacheStorage struct {
 	// PersistentVolumeClaim is the pvc volume used for caching NIM
-	PVC PersistentVolumeClaim `json:"pvc,omitempty"`
-	// HostPath is the host path volume for caching NIM
-	//
-	// Deprecated: use PVC instead.
-	HostPath *string `json:"hostPath,omitempty"`
+	PVC PersistentVolumeClaim `json:"pvc"`
 }
 
 // NIMCacheStatus defines the observed state of NIMCache.
@@ -187,6 +176,34 @@ type Resources struct {
 	// Memory indicates the minimum amount of memory to use while caching NIM
 	// Valid values are numbers followed by one of the suffixes Ki, Mi, Gi, or Ti (e.g. "4Gi", "4096Mi").
 	Memory resource.Quantity `json:"memory,omitempty"`
+}
+
+// ProxySpec defines the proxy configuration for NIMService.
+type ProxySpec struct {
+	HttpProxy     string `json:"httpProxy,omitempty"`
+	HttpsProxy    string `json:"httpsProxy,omitempty"`
+	NoProxy       string `json:"noProxy,omitempty"`
+	CertConfigMap string `json:"certConfigMap,omitempty"`
+}
+
+// PersistentVolumeClaim defines the attributes of PVC.
+type PersistentVolumeClaim struct {
+	// Create specifies whether to create a new PersistentVolumeClaim (PVC).
+	// If set to false, an existing PVC must be referenced via the `Name` field.
+	Create *bool `json:"create,omitempty"`
+	// Name of the PVC to use. Required if `Create` is false (i.e., using an existing PVC).
+	Name string `json:"name,omitempty"`
+	// StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created or
+	// a default storage class is set in the cluster.
+	StorageClass string `json:"storageClass,omitempty"`
+	// Size of the NIM cache in Gi, used during PVC creation
+	Size string `json:"size,omitempty"`
+	// VolumeAccessMode is the volume access mode of the PVC
+	VolumeAccessMode corev1.PersistentVolumeAccessMode `json:"volumeAccessMode,omitempty"`
+	// SubPath is the path inside the PVC that should be mounted
+	SubPath string `json:"subPath,omitempty"`
+	// Annotations for the PVC
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 const (
@@ -257,7 +274,6 @@ func (s *NIMSource) EnvFromSecrets() []corev1.EnvFromSource {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.state`,priority=0
 // +kubebuilder:printcolumn:name="PVC",type=string,JSONPath=`.status.pvc`,priority=0
 // +kubebuilder:printcolumn:name="Age",type="date",format="date-time",JSONPath=".metadata.creationTimestamp",priority=0
@@ -270,6 +286,9 @@ type NIMCache struct {
 	Spec   NIMCacheSpec   `json:"spec,omitempty"`
 	Status NIMCacheStatus `json:"status,omitempty"`
 }
+
+// Hub marks this version as the conversion hub.
+func (*NIMCache) Hub() {}
 
 // GetPVCName returns the name to be used for the PVC based on the custom spec
 // Prefers pvc.Name if explicitly set by the user in the NIMCache instance.
