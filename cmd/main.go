@@ -44,6 +44,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	appsv1alpha1 "github.com/NVIDIA/k8s-nim-operator/api/apps/v1alpha1"
+	appsv1beta1 "github.com/NVIDIA/k8s-nim-operator/api/apps/v1beta1"
 	"github.com/NVIDIA/k8s-nim-operator/internal/conditions"
 	"github.com/NVIDIA/k8s-nim-operator/internal/controller"
 	"github.com/NVIDIA/k8s-nim-operator/internal/render"
@@ -59,6 +60,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(appsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(appsv1beta1.AddToScheme(scheme))
 	utilruntime.Must(monitoring.AddToScheme(scheme))
 	utilruntime.Must(lws.AddToScheme(scheme))
 	utilruntime.Must(kservev1beta1.AddToScheme(scheme))

@@ -39,6 +39,19 @@ resources:
   controller: true
   domain: nvidia.com
   group: apps
+  kind: NIMCache
+  path: github.com/NVIDIA/k8s-nim-operator/api/apps/v1beta1
+  version: v1beta1
+  webhooks:
+    conversion: true
+    validation: true
+    webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: nvidia.com
+  group: apps
   kind: NIMPipeline
   path: github.com/NVIDIA/k8s-nim-operator/api/apps/v1alpha1
   version: v1alpha1
