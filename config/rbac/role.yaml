@@ -1,4 +1,10 @@
 ---
+# Security Note: This ClusterRole requires elevated permissions for the operator to function:
+# - secrets: Required to manage NGC credentials, TLS certificates, and service credentials
+# - pods/eviction: Required for graceful pod management during updates and scaling
+# - securitycontextconstraints: Required for OpenShift deployments to manage SCC policies
+# These permissions are scoped to specific resources and are necessary for operator functionality.
+# See SNYK-CC-K8S-47 for security context.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
