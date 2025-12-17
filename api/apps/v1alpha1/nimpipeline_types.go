@@ -75,6 +75,8 @@ type NIMPipelineStatus struct {
 	States map[string]string `json:"states,omitempty"`
 	// State indicates the overall state of the pipeline
 	State string `json:"state,omitempty"`
+	// ModelVersions contains version metadata for each service in the pipeline
+	ModelVersions map[string]*ModelVersionInfo `json:"modelVersions,omitempty"`
 }
 
 // +genclient

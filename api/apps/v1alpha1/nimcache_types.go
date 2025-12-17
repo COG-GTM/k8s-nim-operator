@@ -170,6 +170,10 @@ type NIMCacheStatus struct {
 	PVC        string             `json:"pvc,omitempty"`
 	Profiles   []NIMProfile       `json:"profiles,omitempty"`
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
+	// ModelVersion contains version metadata for the cached model
+	ModelVersion *ModelVersionInfo `json:"modelVersion,omitempty"`
+	// ExpiresAt is the timestamp when the cache will expire based on TTL annotation
+	ExpiresAt string `json:"expiresAt,omitempty"`
 }
 
 // NIMProfile defines the profiles that were cached.

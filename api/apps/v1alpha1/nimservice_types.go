@@ -181,6 +181,8 @@ type NIMServiceStatus struct {
 	// +listType=map
 	// +listMapKey=name
 	DRAResourceStatuses []DRAResourceStatus `json:"draResourceStatuses,omitempty"`
+	// ModelVersion contains version metadata for the deployed model
+	ModelVersion *ModelVersionInfo `json:"modelVersion,omitempty"`
 }
 
 // ModelStatus defines the configuration of the NIMService model.
