@@ -33,3 +33,6 @@ kubeconfig
 
 # e2e logs
 e2e_logs
+
+# SonarQube scanner work directory
+.scannerwork/
