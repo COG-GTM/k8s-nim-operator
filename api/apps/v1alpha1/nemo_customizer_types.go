@@ -225,6 +225,8 @@ type NemoCustomizerStatus struct {
 	Conditions        []metav1.Condition `json:"conditions,omitempty"`
 	AvailableReplicas int32              `json:"availableReplicas,omitempty"`
 	State             string             `json:"state,omitempty"`
+	// ModelVersion contains version metadata for the customizer service
+	ModelVersion *ModelVersionInfo `json:"modelVersion,omitempty"`
 }
 
 // +genclient

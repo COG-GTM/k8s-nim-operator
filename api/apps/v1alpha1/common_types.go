@@ -402,3 +402,25 @@ type PersistentVolumeClaim struct {
 	// Annotations for the PVC
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
+
+// ModelVersionInfo defines version metadata for model artifacts.
+type ModelVersionInfo struct {
+	// Version is the semantic version of the model (e.g., "1.3.3")
+	// +kubebuilder:validation:Pattern=`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$`
+	Version string `json:"version,omitempty"`
+	// CreatedAt is the timestamp when the model version was created
+	CreatedAt string `json:"createdAt,omitempty"`
+	// SourceRegistry is the registry from which the model was pulled (e.g., "nvcr.io")
+	SourceRegistry string `json:"sourceRegistry,omitempty"`
+}
+
+const (
+	// TTLAnnotationKey is the annotation key for specifying TTL in seconds for model caches.
+	TTLAnnotationKey = "apps.nvidia.com/ttl-seconds"
+
+	// ModelVersionLabelKey is the label key for model version.
+	ModelVersionLabelKey = "apps.nvidia.com/model-version"
+
+	// EnvironmentLabelKey is the label key for environment (staging, production, etc.).
+	EnvironmentLabelKey = "apps.nvidia.com/environment"
+)

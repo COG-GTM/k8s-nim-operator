@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -875,6 +876,13 @@ func (r *NIMCacheReconciler) reconcileNIMCache(ctx context.Context, nimCache *ap
 		return ctrl.Result{}, err
 	}
 
+	// Reconcile model version info and TTL expiration
+	result, err := r.reconcileVersionAndTTL(ctx, nimCache)
+	if err != nil {
+		logger.Error(err, "reconciliation of version and TTL failed")
+		return ctrl.Result{}, err
+	}
+
 	conditions.IfPresentUpdateCondition(&nimCache.Status.Conditions, appsv1alpha1.NimCacheConditionReconcileFailed, metav1.ConditionFalse, "Reconciled", "")
 
 	err = r.updateNIMCacheStatus(ctx, nimCache)
@@ -882,6 +890,12 @@ func (r *NIMCacheReconciler) reconcileNIMCache(ctx context.Context, nimCache *ap
 		logger.Error(err, "Failed to update NIMCache status", "NIMCache", nimCache.Name)
 		return ctrl.Result{}, err
 	}
+
+	// Return the result from version/TTL reconciliation if it requires requeue
+	if result.RequeueAfter > 0 {
+		return result, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -1399,4 +1413,121 @@ func getUniqueGPUProducts(nodeGPUProducts map[string]string) []string {
 	}
 
 	return uniqueGPUProducts
+}
+
+// extractModelVersionInfo extracts version metadata from the model puller image reference.
+// It parses the image reference to extract the version tag and source registry.
+func extractModelVersionInfo(nimCache *appsv1alpha1.NIMCache) *appsv1alpha1.ModelVersionInfo {
+	var modelPuller string
+
+	switch {
+	case nimCache.Spec.Source.NGC != nil:
+		modelPuller = nimCache.Spec.Source.NGC.ModelPuller
+	case nimCache.Spec.Source.DataStore != nil:
+		modelPuller = nimCache.Spec.Source.DataStore.ModelPuller
+	case nimCache.Spec.Source.HF != nil:
+		modelPuller = nimCache.Spec.Source.HF.ModelPuller
+	}
+
+	if modelPuller == "" {
+		return nil
+	}
+
+	versionInfo := &appsv1alpha1.ModelVersionInfo{
+		CreatedAt: nimCache.CreationTimestamp.Format(time.RFC3339),
+	}
+
+	// Extract registry (everything before the first /)
+	parts := strings.SplitN(modelPuller, "/", 2)
+	if len(parts) > 0 {
+		versionInfo.SourceRegistry = parts[0]
+	}
+
+	// Extract version from tag (everything after the last :)
+	if idx := strings.LastIndex(modelPuller, ":"); idx != -1 {
+		tag := modelPuller[idx+1:]
+		// Remove any suffix like -staging, -production for the version
+		versionParts := strings.SplitN(tag, "-", 2)
+		versionInfo.Version = versionParts[0]
+	}
+
+	return versionInfo
+}
+
+// calculateExpiresAt calculates the expiration timestamp based on TTL annotation.
+// Returns empty string if no TTL annotation is set.
+func calculateExpiresAt(nimCache *appsv1alpha1.NIMCache) string {
+	ttlStr, exists := nimCache.Annotations[appsv1alpha1.TTLAnnotationKey]
+	if !exists || ttlStr == "" {
+		return ""
+	}
+
+	ttlSeconds, err := strconv.ParseInt(ttlStr, 10, 64)
+	if err != nil || ttlSeconds <= 0 {
+		return ""
+	}
+
+	expiresAt := nimCache.CreationTimestamp.Add(time.Duration(ttlSeconds) * time.Second)
+	return expiresAt.Format(time.RFC3339)
+}
+
+// isNIMCacheExpired checks if the NIMCache has exceeded its TTL.
+func isNIMCacheExpired(nimCache *appsv1alpha1.NIMCache) bool {
+	if nimCache.Status.ExpiresAt == "" {
+		return false
+	}
+
+	expiresAt, err := time.Parse(time.RFC3339, nimCache.Status.ExpiresAt)
+	if err != nil {
+		return false
+	}
+
+	return time.Now().After(expiresAt)
+}
+
+// reconcileVersionAndTTL updates the model version info and TTL expiration in the status.
+func (r *NIMCacheReconciler) reconcileVersionAndTTL(ctx context.Context, nimCache *appsv1alpha1.NIMCache) (ctrl.Result, error) {
+	logger := r.GetLogger()
+
+	// Update model version info if not already set
+	if nimCache.Status.ModelVersion == nil {
+		nimCache.Status.ModelVersion = extractModelVersionInfo(nimCache)
+		if nimCache.Status.ModelVersion != nil {
+			logger.Info("Updated model version info",
+				"version", nimCache.Status.ModelVersion.Version,
+				"registry", nimCache.Status.ModelVersion.SourceRegistry)
+		}
+	}
+
+	// Update expiration timestamp if TTL annotation is set
+	if nimCache.Status.ExpiresAt == "" {
+		nimCache.Status.ExpiresAt = calculateExpiresAt(nimCache)
+		if nimCache.Status.ExpiresAt != "" {
+			logger.Info("Set cache expiration", "expiresAt", nimCache.Status.ExpiresAt)
+		}
+	}
+
+	// Check if cache has expired and should be deleted
+	if isNIMCacheExpired(nimCache) {
+		logger.Info("NIMCache has expired, marking for deletion", "name", nimCache.Name, "expiresAt", nimCache.Status.ExpiresAt)
+		r.GetEventRecorder().Eventf(nimCache, corev1.EventTypeWarning, "CacheExpired",
+			"NIMCache %s has expired (TTL exceeded), consider deleting this resource", nimCache.Name)
+
+		// Requeue to check again later - the user or an external process should delete the expired cache
+		return ctrl.Result{RequeueAfter: time.Minute * 5}, nil
+	}
+
+	// If TTL is set but not expired, calculate when to requeue for expiration check
+	if nimCache.Status.ExpiresAt != "" {
+		expiresAt, err := time.Parse(time.RFC3339, nimCache.Status.ExpiresAt)
+		if err == nil {
+			timeUntilExpiry := time.Until(expiresAt)
+			if timeUntilExpiry > 0 {
+				// Requeue slightly after expiration to handle the expiration
+				return ctrl.Result{RequeueAfter: timeUntilExpiry + time.Second}, nil
+			}
+		}
+	}
+
+	return ctrl.Result{}, nil
 }
