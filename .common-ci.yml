@@ -23,12 +23,14 @@ variables:
 
 stages:
   - trigger
+  - security-sast
   - package-build
   - image-build
   - test
   - lint
   - helm-lint
   - scan
+  - security-dast
   - release
   - sign
   - helm
@@ -71,6 +73,36 @@ trigger-pipeline:
       when: manual
       allow_failure: false
     - when: always
+
+# SAST scanning with Semgrep
+.sast-scan:
+  stage: security-sast
+  image: returntocorp/semgrep:latest
+  script:
+    - semgrep --config=auto --json --output=semgrep-report.json .
+  artifacts:
+    reports:
+      sast: semgrep-report.json
+    paths:
+      - semgrep-report.json
+    expire_in: 1 week
+  rules:
+    - !reference [.pipeline-trigger-rules, rules]
+
+# Dependency scanning with OWASP dependency-check
+.dependency-check:
+  stage: security-sast
+  image: owasp/dependency-check:latest
+  script:
+    - /usr/share/dependency-check/bin/dependency-check.sh --project "k8s-nim-operator" --scan . --format JSON --out dependency-check-report.json
+  artifacts:
+    reports:
+      dependency_scanning: dependency-check-report.json
+    paths:
+      - dependency-check-report.json
+    expire_in: 1 week
+  rules:
+    - !reference [.pipeline-trigger-rules, rules]
 
 # Define the platform targets
 .platform-amd64:
@@ -132,6 +164,31 @@ scan-arm64:
   needs:
     - image-pull
     - scan-amd64
+
+# Security gate to fail builds on critical vulnerabilities
+security-gate:
+  stage: security-dast
+  image: alpine:latest
+  script:
+    - apk add --no-cache jq
+    - |
+      # Check for critical vulnerabilities in scan results
+      if [ -f vulns.json ]; then
+        CRITICAL=$(jq '[.vulnerabilities[]? | select(.severity == "CRITICAL")] | length' vulns.json 2>/dev/null || echo "0")
+        if [ "$CRITICAL" -gt 0 ]; then
+          echo "Found $CRITICAL critical vulnerabilities - failing pipeline"
+          exit 1
+        fi
+        echo "No critical vulnerabilities found"
+      else
+        echo "No vulnerability scan results found - skipping gate"
+      fi
+  needs:
+    - scan-amd64
+    - scan-arm64
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_TAG
 
 # Download the regctl binary for use in the release steps
 .regctl-setup:
