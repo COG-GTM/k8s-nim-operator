@@ -110,6 +110,34 @@ image-pull:
       - vulns.json
       - policy_evaluation.json
 
+# Enhanced container scanning with Trivy and Grype
+.container-scan:
+  extends: .scan
+  script:
+    - !reference [.scan, script]
+    - |
+      # Install Trivy
+      apk add --no-cache curl
+      curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+      # Run Trivy scanning
+      docker pull ${IMAGE}
+      trivy image --format json --output trivy-report.json ${IMAGE} || true
+      # Install and run Grype scanning
+      curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+      grype ${IMAGE} -o json > grype-report.json || true
+  artifacts:
+    reports:
+      container_scanning: trivy-report.json
+    paths:
+      - trivy-report.json
+      - grype-report.json
+      - pulse-cli.log
+      - licenses.json
+      - sbom.json
+      - vulns.json
+      - policy_evaluation.json
+    expire_in: 1 week
+
 # Define external release helpers
 .release:ngc:
   extends:

@@ -56,6 +56,24 @@ helm-lint:
   script:
     - helm lint deployments/helm/k8s-nim-operator/
 
+# OPA policy validation for infrastructure security
+policy-check:
+  stage: security-sast
+  image: openpolicyagent/opa:latest
+  script:
+    - |
+      if [ -d "policy/" ]; then
+        opa eval -d policy/ -i deployments/helm/k8s-nim-operator/values.yaml "data.security.allow" --format json > policy-report.json || true
+      else
+        echo '{"result": "no policies defined"}' > policy-report.json
+      fi
+  artifacts:
+    paths:
+      - policy-report.json
+    expire_in: 1 week
+  rules:
+    - !reference [.pipeline-trigger-rules, rules]
+
 # Define the image build targets
 .image-build:
   stage: image-build
