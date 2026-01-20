@@ -137,26 +137,6 @@ production:
 
 See [here](https://github.com/go-sql-driver/mysql#parsetime) for more information.
 
-### Oracle (oci8)
-
-Oracle Driver is [oci8](https://github.com/mattn/go-oci8), it is not pure Go code and relies on Oracle Office Client ([Instant Client](https://www.oracle.com/database/technologies/instant-client/downloads.html)), more detailed information is in the [oci8 repo](https://github.com/mattn/go-oci8).
-
-#### Install with Oracle support
-
-To install the library and command line program, use the following:
-
-```bash
-go get -tags oracle -v github.com/rubenv/sql-migrate/...
-```
-
-```yml
-development:
-  dialect: oci8
-  datasource: user/password@localhost:1521/sid
-  dir: migrations/oracle
-  table: migrations
-```
-
 ### Oracle (godror)
 
 Oracle Driver is [godror](https://github.com/godror/godror), it is not pure Go code and relies on Oracle Office Client ([Instant Client](https://www.oracle.com/database/technologies/instant-client/downloads.html)), more detailed information is in the [godror repository](https://github.com/godror/godror).
