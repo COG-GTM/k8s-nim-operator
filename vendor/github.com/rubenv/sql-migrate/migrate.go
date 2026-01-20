@@ -202,7 +202,6 @@ var MigrationDialects = map[string]gorp.Dialect{
 	"postgres":  gorp.PostgresDialect{},
 	"mysql":     gorp.MySQLDialect{Engine: "InnoDB", Encoding: "UTF8"},
 	"mssql":     gorp.SqlServerDialect{},
-	"oci8":      OracleDialect{},
 	"godror":    OracleDialect{},
 	"snowflake": gorp.SnowflakeDialect{},
 }
@@ -640,7 +639,7 @@ func (ms MigrationSet) planMigrationCommon(db *sql.DB, dialect string, m Migrati
 	}
 
 	// Sort migrations that have been run by Id.
-	var existingMigrations []*Migration
+	existingMigrations := make([]*Migration, 0, len(migrationRecords))
 	for _, migrationRecord := range migrationRecords {
 		existingMigrations = append(existingMigrations, &Migration{
 			Id: migrationRecord.Id,
@@ -700,13 +699,14 @@ func (ms MigrationSet) planMigrationCommon(db *sql.DB, dialect string, m Migrati
 		toApplyCount = max
 	}
 	for _, v := range toApply[0:toApplyCount] {
-		if dir == Up {
+		switch dir {
+		case Up:
 			result = append(result, &PlannedMigration{
 				Migration:          v,
 				Queries:            v.Up,
 				DisableTransaction: v.DisableTransactionUp,
 			})
-		} else if dir == Down {
+		case Down:
 			result = append(result, &PlannedMigration{
 				Migration:          v,
 				Queries:            v.Down,
@@ -779,14 +779,13 @@ func ToApply(migrations []*Migration, current string, direction MigrationDirecti
 		}
 	}
 
-	if direction == Up {
+	switch direction {
+	case Up:
 		return migrations[index+1:]
-	} else if direction == Down {
+	case Down:
 		if index == -1 {
 			return []*Migration{}
 		}
-
-		// Add in reverse order
 		toApply := make([]*Migration, index+1)
 		for i := 0; i < index+1; i++ {
 			toApply[index-i] = migrations[i]
@@ -867,7 +866,7 @@ Check https://github.com/go-sql-driver/mysql#parsetime for more info.`)
 	dbMap := &gorp.DbMap{Db: db, Dialect: d}
 	table := dbMap.AddTableWithNameAndSchema(MigrationRecord{}, ms.SchemaName, ms.getTableName()).SetKeys(false, "Id")
 
-	if dialect == "oci8" || dialect == "godror" {
+	if dialect == "godror" {
 		table.ColMap("Id").SetMaxSize(4000)
 	}
 
@@ -879,7 +878,7 @@ Check https://github.com/go-sql-driver/mysql#parsetime for more info.`)
 	if err != nil {
 		// Oracle database does not support `if not exists`, so use `ORA-00955:` error code
 		// to check if the table exists.
-		if (dialect == "oci8" || dialect == "godror") && strings.Contains(err.Error(), "ORA-00955:") {
+		if dialect == "godror" && strings.Contains(err.Error(), "ORA-00955:") {
 			return dbMap, nil
 		}
 		return nil, err
