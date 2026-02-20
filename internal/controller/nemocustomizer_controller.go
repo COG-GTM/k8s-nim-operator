@@ -312,188 +312,198 @@ func (r *NemoCustomizerReconciler) reconcileNemoCustomizer(ctx context.Context, 
 				"NemoCustomizer %s failed, msg: %s", nemoCustomizer.Name, err.Error())
 		}
 	}()
-	// Generate annotation for the current operator-version and apply to all resources
-	// Get generic name for all resources
+
 	namespacedName := types.NamespacedName{Name: nemoCustomizer.GetName(), Namespace: nemoCustomizer.GetNamespace()}
 	renderer := r.GetRenderer()
 
-	// Sync serviceaccount
-	err = r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &corev1.ServiceAccount{}, func() (client.Object, error) {
-		return renderer.ServiceAccount(nemoCustomizer.GetServiceAccountParams())
-	}, "serviceaccount", conditions.ReasonServiceAccountFailed)
+	if err = r.syncCoreResources(ctx, nemoCustomizer, renderer); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err = r.syncOptionalResources(ctx, nemoCustomizer, renderer, namespacedName); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	customizerConfigYAML, err := r.syncConfigAndSecrets(ctx, nemoCustomizer, renderer)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Sync role
+	if err = r.syncDeployment(ctx, nemoCustomizer, renderer, customizerConfigYAML); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err = r.updateDeploymentStatus(ctx, nemoCustomizer, &namespacedName); err != nil {
+		logger.Error(err, "Unable to update status")
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *NemoCustomizerReconciler) syncCoreResources(ctx context.Context, nemoCustomizer *appsv1alpha1.NemoCustomizer, renderer render.Renderer) error {
+	err := r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &corev1.ServiceAccount{}, func() (client.Object, error) {
+		return renderer.ServiceAccount(nemoCustomizer.GetServiceAccountParams())
+	}, "serviceaccount", conditions.ReasonServiceAccountFailed)
+	if err != nil {
+		return err
+	}
+
 	err = r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &rbacv1.Role{}, func() (client.Object, error) {
 		return renderer.Role(nemoCustomizer.GetRoleParams())
 	}, "role", conditions.ReasonRoleFailed)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
-	// Sync rolebinding
 	err = r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &rbacv1.RoleBinding{}, func() (client.Object, error) {
 		return renderer.RoleBinding(nemoCustomizer.GetRoleBindingParams())
 	}, "rolebinding", conditions.ReasonRoleBindingFailed)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
-	// Sync service
-	err = r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &corev1.Service{}, func() (client.Object, error) {
+	return r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &corev1.Service{}, func() (client.Object, error) {
 		return renderer.Service(nemoCustomizer.GetServiceParams())
 	}, "service", conditions.ReasonServiceFailed)
-	if err != nil {
-		return ctrl.Result{}, err
+}
+
+func (r *NemoCustomizerReconciler) syncOptionalResources(ctx context.Context, nemoCustomizer *appsv1alpha1.NemoCustomizer, renderer render.Renderer, namespacedName types.NamespacedName) error {
+	if err := r.syncIngress(ctx, nemoCustomizer, renderer, namespacedName); err != nil {
+		return err
 	}
 
-	// Sync ingress
+	if err := r.syncHTTPRoute(ctx, nemoCustomizer, renderer, namespacedName); err != nil {
+		return err
+	}
+
+	if err := r.syncHPA(ctx, nemoCustomizer, renderer, namespacedName); err != nil {
+		return err
+	}
+
+	return r.syncServiceMonitor(ctx, nemoCustomizer, renderer)
+}
+
+func (r *NemoCustomizerReconciler) syncIngress(ctx context.Context, nemoCustomizer *appsv1alpha1.NemoCustomizer, renderer render.Renderer, namespacedName types.NamespacedName) error {
 	if nemoCustomizer.IsIngressEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &networkingv1.Ingress{}, func() (client.Object, error) {
+		return r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &networkingv1.Ingress{}, func() (client.Object, error) {
 			return renderer.Ingress(nemoCustomizer.GetIngressParams())
 		}, "ingress", conditions.ReasonIngressFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	} else {
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &networkingv1.Ingress{}, namespacedName)
-		if err != nil && !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
 	}
+	err := k8sutil.CleanupResource(ctx, r.GetClient(), &networkingv1.Ingress{}, namespacedName)
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
 
-	// Sync HTTPRoute
+func (r *NemoCustomizerReconciler) syncHTTPRoute(ctx context.Context, nemoCustomizer *appsv1alpha1.NemoCustomizer, renderer render.Renderer, namespacedName types.NamespacedName) error {
 	if nemoCustomizer.IsHTTPRouteEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &gatewayv1.HTTPRoute{}, func() (client.Object, error) {
+		return r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &gatewayv1.HTTPRoute{}, func() (client.Object, error) {
 			return renderer.HTTPRoute(nemoCustomizer.GetHTTPRouteParams())
 		}, "httproute", conditions.ReasonHTTPRouteFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	} else {
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &gatewayv1.HTTPRoute{}, namespacedName)
-		if err != nil && !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
 	}
+	err := k8sutil.CleanupResource(ctx, r.GetClient(), &gatewayv1.HTTPRoute{}, namespacedName)
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
 
-	// Sync HPA
+func (r *NemoCustomizerReconciler) syncHPA(ctx context.Context, nemoCustomizer *appsv1alpha1.NemoCustomizer, renderer render.Renderer, namespacedName types.NamespacedName) error {
 	if nemoCustomizer.IsAutoScalingEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &autoscalingv2.HorizontalPodAutoscaler{}, func() (client.Object, error) {
+		return r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &autoscalingv2.HorizontalPodAutoscaler{}, func() (client.Object, error) {
 			return renderer.HPA(nemoCustomizer.GetHPAParams())
 		}, "hpa", conditions.ReasonHPAFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	} else {
-		// If autoscaling is disabled, ensure the HPA is deleted
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &autoscalingv2.HorizontalPodAutoscaler{}, namespacedName)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
 	}
+	return k8sutil.CleanupResource(ctx, r.GetClient(), &autoscalingv2.HorizontalPodAutoscaler{}, namespacedName)
+}
 
-	// Sync Service Monitor
-	if nemoCustomizer.IsServiceMonitorEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &monitoringv1.ServiceMonitor{}, func() (client.Object, error) {
-			return renderer.ServiceMonitor(nemoCustomizer.GetServiceMonitorParams())
-		}, "servicemonitor", conditions.ReasonServiceMonitorFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
+func (r *NemoCustomizerReconciler) syncServiceMonitor(ctx context.Context, nemoCustomizer *appsv1alpha1.NemoCustomizer, renderer render.Renderer) error {
+	if !nemoCustomizer.IsServiceMonitorEnabled() {
+		return nil
 	}
+	return r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &monitoringv1.ServiceMonitor{}, func() (client.Object, error) {
+		return renderer.ServiceMonitor(nemoCustomizer.GetServiceMonitorParams())
+	}, "servicemonitor", conditions.ReasonServiceMonitorFailed)
+}
 
-	// Sync Customizer ConfigMap
+func (r *NemoCustomizerReconciler) syncConfigAndSecrets(ctx context.Context, nemoCustomizer *appsv1alpha1.NemoCustomizer, renderer render.Renderer) ([]byte, error) {
 	customizerConfigYAML, err := r.renderCustomizerConfig(ctx, nemoCustomizer)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("rendering customizer config: %w", err)
+		return nil, fmt.Errorf("rendering customizer config: %w", err)
 	}
 
 	err = r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &corev1.ConfigMap{}, func() (client.Object, error) {
 		return renderer.ConfigMap(nemoCustomizer.GetConfigMapParams(customizerConfigYAML))
 	}, "configmap", conditions.ReasonConfigMapFailed)
 	if err != nil {
-		return ctrl.Result{}, err
+		return nil, err
 	}
 
 	secretValue, err := r.getValueFromSecret(ctx, nemoCustomizer.GetNamespace(), nemoCustomizer.Spec.DatabaseConfig.Credentials.SecretName, nemoCustomizer.Spec.DatabaseConfig.Credentials.PasswordKey)
 	if err != nil {
-		return ctrl.Result{}, err
+		return nil, err
 	}
 	data := nemoCustomizer.GeneratePostgresConnString(secretValue)
-	// Encode to base64
 	encoded := base64.StdEncoding.EncodeToString([]byte(data))
 
 	secretMapData := map[string]string{
 		"dsn": encoded,
 	}
-	// Sync Customizer Secret
 	err = r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &corev1.Secret{}, func() (client.Object, error) {
 		return renderer.Secret(nemoCustomizer.GetSecretParams(secretMapData))
 	}, "secret", conditions.ReasonSecretFailed)
 	if err != nil {
-		return ctrl.Result{}, err
+		return nil, err
 	}
 
-	// Sync Customizer PVC for model storage
 	if err = r.reconcilePVC(ctx, nemoCustomizer); err != nil {
-		return ctrl.Result{}, err
+		return nil, err
 	}
 
-	// Get params to render Deployment resource
+	return customizerConfigYAML, nil
+}
+
+func (r *NemoCustomizerReconciler) syncDeployment(ctx context.Context, nemoCustomizer *appsv1alpha1.NemoCustomizer, renderer render.Renderer, customizerConfigYAML []byte) error {
 	deploymentParams := nemoCustomizer.GetDeploymentParams()
 
-	// Calculate the hash of the config data
 	configHash := utils.CalculateSHA256(string(customizerConfigYAML))
 	annotations := deploymentParams.PodAnnotations
 	if annotations == nil {
 		annotations = make(map[string]string)
 	}
 
-	// Check if the hash has changed
 	if annotations[ConfigHashAnnotationKey] != configHash {
 		annotations[ConfigHashAnnotationKey] = configHash
 		deploymentParams.PodAnnotations = annotations
 	}
 
-	// Setup volume mounts with customizer config
 	deploymentParams.Volumes = nemoCustomizer.GetVolumes()
 	deploymentParams.VolumeMounts = nemoCustomizer.GetVolumeMounts()
 
-	// Sync deployment
-	err = r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &appsv1.Deployment{}, func() (client.Object, error) {
+	return r.renderAndSyncResource(ctx, nemoCustomizer, &renderer, &appsv1.Deployment{}, func() (client.Object, error) {
 		return renderer.Deployment(deploymentParams)
 	}, "deployment", conditions.ReasonDeploymentFailed)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+}
 
-	// Wait for deployment
-	msg, ready, err := k8sutil.IsDeploymentReady(ctx, r.GetClient(), &namespacedName)
+func (r *NemoCustomizerReconciler) updateDeploymentStatus(ctx context.Context, nemoCustomizer *appsv1alpha1.NemoCustomizer, namespacedName *types.NamespacedName) error {
+	msg, ready, err := k8sutil.IsDeploymentReady(ctx, r.GetClient(), namespacedName)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
 	if !ready {
-		// Update status as NotReady
 		err = r.updater.SetConditionsNotReady(ctx, nemoCustomizer, conditions.NotReady, msg)
 		r.GetEventRecorder().Eventf(nemoCustomizer, corev1.EventTypeNormal, conditions.NotReady,
 			"NemoCustomizer %s not ready yet, msg: %s", nemoCustomizer.Name, msg)
 	} else {
-		// Update status as ready
 		err = r.updater.SetConditionsReady(ctx, nemoCustomizer, conditions.Ready, msg)
 		r.GetEventRecorder().Eventf(nemoCustomizer, corev1.EventTypeNormal, conditions.Ready,
 			"NemoCustomizer %s ready, msg: %s", nemoCustomizer.Name, msg)
 	}
 
-	if err != nil {
-		logger.Error(err, "Unable to update status")
-		return ctrl.Result{}, err
-	}
-
-	return ctrl.Result{}, nil
+	return err
 }
 
 func (r *NemoCustomizerReconciler) reconcilePVC(ctx context.Context, nemoCustomizer *appsv1alpha1.NemoCustomizer) error {
