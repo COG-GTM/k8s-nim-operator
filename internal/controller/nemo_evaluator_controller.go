@@ -296,12 +296,10 @@ func (r *NemoEvaluatorReconciler) reconcileNemoEvaluator(ctx context.Context, ne
 				"NemoEvaluator %s failed, msg: %s", nemoEvaluator.Name, err.Error())
 		}
 	}()
-	// Generate annotation for the current operator-version and apply to all resources
-	// Get generic name for all resources
+
 	namespacedName := types.NamespacedName{Name: nemoEvaluator.GetName(), Namespace: nemoEvaluator.GetNamespace()}
 	renderer := r.GetRenderer()
 
-	// Sync serviceaccount
 	err = r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &corev1.ServiceAccount{}, func() (client.Object, error) {
 		return renderer.ServiceAccount(nemoEvaluator.GetServiceAccountParams())
 	}, "serviceaccount", conditions.ReasonServiceAccountFailed)
@@ -309,7 +307,6 @@ func (r *NemoEvaluatorReconciler) reconcileNemoEvaluator(ctx context.Context, ne
 		return ctrl.Result{}, err
 	}
 
-	// Sync role
 	err = r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &rbacv1.Role{}, func() (client.Object, error) {
 		return renderer.Role(nemoEvaluator.GetRoleParams())
 	}, "role", conditions.ReasonRoleFailed)
@@ -317,7 +314,6 @@ func (r *NemoEvaluatorReconciler) reconcileNemoEvaluator(ctx context.Context, ne
 		return ctrl.Result{}, err
 	}
 
-	// Sync rolebinding
 	err = r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &rbacv1.RoleBinding{}, func() (client.Object, error) {
 		return renderer.RoleBinding(nemoEvaluator.GetRoleBindingParams())
 	}, "rolebinding", conditions.ReasonRoleBindingFailed)
@@ -325,7 +321,6 @@ func (r *NemoEvaluatorReconciler) reconcileNemoEvaluator(ctx context.Context, ne
 		return ctrl.Result{}, err
 	}
 
-	// Sync service
 	err = r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &corev1.Service{}, func() (client.Object, error) {
 		return renderer.Service(nemoEvaluator.GetServiceParams())
 	}, "service", conditions.ReasonServiceFailed)
@@ -333,87 +328,102 @@ func (r *NemoEvaluatorReconciler) reconcileNemoEvaluator(ctx context.Context, ne
 		return ctrl.Result{}, err
 	}
 
-	// Sync ingress
-	if nemoEvaluator.IsIngressEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &networkingv1.Ingress{}, func() (client.Object, error) {
-			return renderer.Ingress(nemoEvaluator.GetIngressParams())
-		}, "ingress", conditions.ReasonIngressFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	} else {
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &networkingv1.Ingress{}, namespacedName)
-		if err != nil && !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Sync HTTPRoute
-	if nemoEvaluator.IsHTTPRouteEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &gatewayv1.HTTPRoute{}, func() (client.Object, error) {
-			return renderer.HTTPRoute(nemoEvaluator.GetHTTPRouteParams())
-		}, "httproute", conditions.ReasonHTTPRouteFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	} else {
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &gatewayv1.HTTPRoute{}, namespacedName)
-		if err != nil && !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Sync HPA
-	if nemoEvaluator.IsAutoScalingEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &autoscalingv2.HorizontalPodAutoscaler{}, func() (client.Object, error) {
-			return renderer.HPA(nemoEvaluator.GetHPAParams())
-		}, "hpa", conditions.ReasonHPAFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	} else {
-		// If autoscaling is disabled, ensure the HPA is deleted
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &autoscalingv2.HorizontalPodAutoscaler{}, namespacedName)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Sync Service Monitor
-	if nemoEvaluator.IsServiceMonitorEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &monitoringv1.ServiceMonitor{}, func() (client.Object, error) {
-			return renderer.ServiceMonitor(nemoEvaluator.GetServiceMonitorParams())
-		}, "servicemonitor", conditions.ReasonServiceMonitorFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	secretValue, err := r.getValueFromSecret(ctx, nemoEvaluator.GetNamespace(), nemoEvaluator.Spec.DatabaseConfig.Credentials.SecretName, nemoEvaluator.Spec.DatabaseConfig.Credentials.PasswordKey)
-	if err != nil {
+	if err = r.syncIngress(ctx, nemoEvaluator, renderer, namespacedName); err != nil {
 		return ctrl.Result{}, err
 	}
+
+	if err = r.syncHTTPRoute(ctx, nemoEvaluator, renderer, namespacedName); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err = r.syncHPA(ctx, nemoEvaluator, renderer, namespacedName); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err = r.syncServiceMonitor(ctx, nemoEvaluator, renderer); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err = r.syncEvaluatorSecret(ctx, nemoEvaluator, renderer); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err = r.syncEvaluatorDeployment(ctx, nemoEvaluator, renderer); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	var result ctrl.Result
+	result, err = r.updateEvaluatorStatus(ctx, nemoEvaluator, namespacedName)
+	if err != nil {
+		logger.Error(err, "Unable to update status")
+	}
+	return result, err
+}
+
+func (r *NemoEvaluatorReconciler) syncIngress(ctx context.Context, nemoEvaluator *appsv1alpha1.NemoEvaluator, renderer render.Renderer, namespacedName types.NamespacedName) error {
+	if nemoEvaluator.IsIngressEnabled() {
+		return r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &networkingv1.Ingress{}, func() (client.Object, error) {
+			return renderer.Ingress(nemoEvaluator.GetIngressParams())
+		}, "ingress", conditions.ReasonIngressFailed)
+	}
+	err := k8sutil.CleanupResource(ctx, r.GetClient(), &networkingv1.Ingress{}, namespacedName)
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+func (r *NemoEvaluatorReconciler) syncHTTPRoute(ctx context.Context, nemoEvaluator *appsv1alpha1.NemoEvaluator, renderer render.Renderer, namespacedName types.NamespacedName) error {
+	if nemoEvaluator.IsHTTPRouteEnabled() {
+		return r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &gatewayv1.HTTPRoute{}, func() (client.Object, error) {
+			return renderer.HTTPRoute(nemoEvaluator.GetHTTPRouteParams())
+		}, "httproute", conditions.ReasonHTTPRouteFailed)
+	}
+	err := k8sutil.CleanupResource(ctx, r.GetClient(), &gatewayv1.HTTPRoute{}, namespacedName)
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+func (r *NemoEvaluatorReconciler) syncHPA(ctx context.Context, nemoEvaluator *appsv1alpha1.NemoEvaluator, renderer render.Renderer, namespacedName types.NamespacedName) error {
+	if nemoEvaluator.IsAutoScalingEnabled() {
+		return r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &autoscalingv2.HorizontalPodAutoscaler{}, func() (client.Object, error) {
+			return renderer.HPA(nemoEvaluator.GetHPAParams())
+		}, "hpa", conditions.ReasonHPAFailed)
+	}
+	return k8sutil.CleanupResource(ctx, r.GetClient(), &autoscalingv2.HorizontalPodAutoscaler{}, namespacedName)
+}
+
+func (r *NemoEvaluatorReconciler) syncServiceMonitor(ctx context.Context, nemoEvaluator *appsv1alpha1.NemoEvaluator, renderer render.Renderer) error {
+	if !nemoEvaluator.IsServiceMonitorEnabled() {
+		return nil
+	}
+	return r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &monitoringv1.ServiceMonitor{}, func() (client.Object, error) {
+		return renderer.ServiceMonitor(nemoEvaluator.GetServiceMonitorParams())
+	}, "servicemonitor", conditions.ReasonServiceMonitorFailed)
+}
+
+func (r *NemoEvaluatorReconciler) syncEvaluatorSecret(ctx context.Context, nemoEvaluator *appsv1alpha1.NemoEvaluator, renderer render.Renderer) error {
+	secretValue, err := r.getValueFromSecret(ctx, nemoEvaluator.GetNamespace(), nemoEvaluator.Spec.DatabaseConfig.Credentials.SecretName, nemoEvaluator.Spec.DatabaseConfig.Credentials.PasswordKey)
+	if err != nil {
+		return err
+	}
 	data := nemoEvaluator.GeneratePostgresConnString(secretValue)
-	// Encode to base64
 	encoded := base64.StdEncoding.EncodeToString([]byte(data))
 
 	secretMapData := map[string]string{
 		"uri": encoded,
 	}
 
-	// Sync Evaluator Secret
-	err = r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &corev1.Secret{}, func() (client.Object, error) {
+	return r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &corev1.Secret{}, func() (client.Object, error) {
 		return renderer.Secret(nemoEvaluator.GetSecretParams(secretMapData))
 	}, "secret", conditions.ReasonSecretFailed)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+}
 
+func (r *NemoEvaluatorReconciler) syncEvaluatorDeployment(ctx context.Context, nemoEvaluator *appsv1alpha1.NemoEvaluator, renderer render.Renderer) error {
 	deploymentParams := nemoEvaluator.GetDeploymentParams()
-
-	// Sync deployment
-	err = r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &appsv1.Deployment{}, func() (client.Object, error) {
-
+	return r.renderAndSyncResource(ctx, nemoEvaluator, &renderer, &appsv1.Deployment{}, func() (client.Object, error) {
 		result, err := renderer.Deployment(deploymentParams)
 		if err != nil {
 			return nil, err
@@ -424,33 +434,27 @@ func (r *NemoEvaluatorReconciler) reconcileNemoEvaluator(ctx context.Context, ne
 		}
 		return result, err
 	}, "deployment", conditions.ReasonDeploymentFailed)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+}
 
-	// Wait for deployment
+func (r *NemoEvaluatorReconciler) updateEvaluatorStatus(ctx context.Context, nemoEvaluator *appsv1alpha1.NemoEvaluator, namespacedName types.NamespacedName) (ctrl.Result, error) {
 	msg, ready, err := k8sutil.IsDeploymentReady(ctx, r.GetClient(), &namespacedName)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	if !ready {
-		// Update status as NotReady
 		err = r.updater.SetConditionsNotReady(ctx, nemoEvaluator, conditions.NotReady, msg)
 		r.GetEventRecorder().Eventf(nemoEvaluator, corev1.EventTypeNormal, conditions.NotReady,
 			"NemoEvaluator %s not ready yet, msg: %s", nemoEvaluator.Name, msg)
 	} else {
-		// Update status as ready
 		err = r.updater.SetConditionsReady(ctx, nemoEvaluator, conditions.Ready, msg)
 		r.GetEventRecorder().Eventf(nemoEvaluator, corev1.EventTypeNormal, conditions.Ready,
 			"NemoEvaluator %s ready, msg: %s", nemoEvaluator.Name, msg)
 	}
 
 	if err != nil {
-		logger.Error(err, "Unable to update status")
 		return ctrl.Result{}, err
 	}
-
 	return ctrl.Result{}, nil
 }
 
