@@ -206,7 +206,6 @@ func validateDRAResourcesConfiguration(spec *appsv1alpha1.NIMServiceSpec, fldPat
 	errList := field.ErrorList{}
 	draResourcesPath := fldPath.Child("draResources")
 
-	// If the length is > 0, check k8s compatibility version
 	if len(spec.DRAResources) > 0 {
 		if !utils.IsVersionGreaterThanOrEqual(k8sVersion, utils.MinSupportedClusterVersionForDRA) {
 			errList = append(errList, field.Forbidden(draResourcesPath, fmt.Sprintf("is not supported by NIM-Operator on this cluster, please upgrade to k8s version '%s' or higher", utils.MinSupportedClusterVersionForDRA)))
@@ -216,62 +215,74 @@ func validateDRAResourcesConfiguration(spec *appsv1alpha1.NIMServiceSpec, fldPat
 	seen := make(map[string]struct{})
 
 	for i, dra := range spec.DRAResources {
-		idxPath := draResourcesPath.Index(i)
-
-		hasName := dra.ResourceClaimName != nil && *dra.ResourceClaimName != ""
-		hasTemplate := dra.ResourceClaimTemplateName != nil && *dra.ResourceClaimTemplateName != ""
-		hasSpec := dra.ClaimCreationSpec != nil
-
-		var fieldCount int
-		if hasName {
-			fieldCount++
-		}
-		if hasTemplate {
-			fieldCount++
-		}
-		if hasSpec {
-			fieldCount++
-		}
-
-		// Exactly one of resourceClaimName, resourceClaimTemplateName, or claimCreationSpec must be provided
-		if fieldCount == 0 {
-			errList = append(errList, field.Required(idxPath, fmt.Sprintf("one of %s, %s, or %s must be provided", fldPath.Child("resourceClaimName"), fldPath.Child("resourceClaimTemplateName"), fldPath.Child("claimCreationSpec"))))
-		} else if fieldCount > 1 {
-			errList = append(errList, field.Invalid(
-				idxPath,
-				"multiple dra resource sources defined",
-				fmt.Sprintf("must specify exactly one of %s, %s, or %s", fldPath.Child("resourceClaimName"), fldPath.Child("resourceClaimTemplateName"), fldPath.Child("claimCreationSpec"))))
-		}
-
-		if hasName {
-			// resourceClaimName: spec.relicas must be <= 1 and spec.scale.enabled must be false.
-			if spec.Replicas > 1 {
-				errList = append(errList, field.Forbidden(
-					idxPath.Child("resourceClaimName"),
-					fmt.Sprintf("must not be set when %s > 1, use %s instead", fldPath.Child("replicas"), idxPath.Child("resourceClaimTemplateName")),
-				))
-			}
-			if spec.Scale.Enabled != nil && *spec.Scale.Enabled {
-				errList = append(errList, field.Forbidden(
-					idxPath.Child("resourceClaimName"),
-					fmt.Sprintf("must not be set when %s is true, use %s instead", fldPath.Child("scale").Child("enabled"), idxPath.Child("resourceClaimTemplateName")),
-				))
-			}
-			// Ensure resourceClaimName values are unique within draResources
-			if _, exists := seen[*dra.ResourceClaimName]; exists {
-				errList = append(errList, field.Duplicate(idxPath.Child("resourceClaimName"), *dra.ResourceClaimName))
-			} else {
-				seen[*dra.ResourceClaimName] = struct{}{}
-			}
-		}
-
-		if hasSpec {
-			wList, eList := validateDRAClaimCreationSpec(&dra, idxPath.Child("claimCreationSpec"))
-			warningList = append(warningList, wList...)
-			errList = append(errList, eList...)
-		}
+		w, e := validateSingleDRAResource(spec, &dra, i, seen, fldPath, draResourcesPath)
+		warningList = append(warningList, w...)
+		errList = append(errList, e...)
 	}
 	return warningList, errList
+}
+
+func validateSingleDRAResource(spec *appsv1alpha1.NIMServiceSpec, dra *appsv1alpha1.DRAResource, idx int, seen map[string]struct{}, fldPath *field.Path, draResourcesPath *field.Path) (admission.Warnings, field.ErrorList) {
+	warningList := admission.Warnings{}
+	errList := field.ErrorList{}
+	idxPath := draResourcesPath.Index(idx)
+
+	hasName := dra.ResourceClaimName != nil && *dra.ResourceClaimName != ""
+	hasTemplate := dra.ResourceClaimTemplateName != nil && *dra.ResourceClaimTemplateName != ""
+	hasSpec := dra.ClaimCreationSpec != nil
+
+	var fieldCount int
+	if hasName {
+		fieldCount++
+	}
+	if hasTemplate {
+		fieldCount++
+	}
+	if hasSpec {
+		fieldCount++
+	}
+
+	if fieldCount == 0 {
+		errList = append(errList, field.Required(idxPath, fmt.Sprintf("one of %s, %s, or %s must be provided", fldPath.Child("resourceClaimName"), fldPath.Child("resourceClaimTemplateName"), fldPath.Child("claimCreationSpec"))))
+	} else if fieldCount > 1 {
+		errList = append(errList, field.Invalid(
+			idxPath,
+			"multiple dra resource sources defined",
+			fmt.Sprintf("must specify exactly one of %s, %s, or %s", fldPath.Child("resourceClaimName"), fldPath.Child("resourceClaimTemplateName"), fldPath.Child("claimCreationSpec"))))
+	}
+
+	if hasName {
+		errList = append(errList, validateDRAResourceClaimName(spec, dra, seen, idxPath, fldPath)...)
+	}
+
+	if hasSpec {
+		wList, eList := validateDRAClaimCreationSpec(dra, idxPath.Child("claimCreationSpec"))
+		warningList = append(warningList, wList...)
+		errList = append(errList, eList...)
+	}
+	return warningList, errList
+}
+
+func validateDRAResourceClaimName(spec *appsv1alpha1.NIMServiceSpec, dra *appsv1alpha1.DRAResource, seen map[string]struct{}, idxPath *field.Path, fldPath *field.Path) field.ErrorList {
+	errList := field.ErrorList{}
+	if spec.Replicas > 1 {
+		errList = append(errList, field.Forbidden(
+			idxPath.Child("resourceClaimName"),
+			fmt.Sprintf("must not be set when %s > 1, use %s instead", fldPath.Child("replicas"), idxPath.Child("resourceClaimTemplateName")),
+		))
+	}
+	if spec.Scale.Enabled != nil && *spec.Scale.Enabled {
+		errList = append(errList, field.Forbidden(
+			idxPath.Child("resourceClaimName"),
+			fmt.Sprintf("must not be set when %s is true, use %s instead", fldPath.Child("scale").Child("enabled"), idxPath.Child("resourceClaimTemplateName")),
+		))
+	}
+	if _, exists := seen[*dra.ResourceClaimName]; exists {
+		errList = append(errList, field.Duplicate(idxPath.Child("resourceClaimName"), *dra.ResourceClaimName))
+	} else {
+		seen[*dra.ResourceClaimName] = struct{}{}
+	}
+	return errList
 }
 
 func validateDRAClaimCreationSpec(dra *appsv1alpha1.DRAResource, fldPath *field.Path) (admission.Warnings, field.ErrorList) {
