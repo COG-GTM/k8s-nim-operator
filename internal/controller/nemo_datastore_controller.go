@@ -48,6 +48,7 @@ import (
 	"github.com/NVIDIA/k8s-nim-operator/internal/conditions"
 	"github.com/NVIDIA/k8s-nim-operator/internal/k8sutil"
 	"github.com/NVIDIA/k8s-nim-operator/internal/render"
+	rendertypes "github.com/NVIDIA/k8s-nim-operator/internal/render/types"
 	"github.com/NVIDIA/k8s-nim-operator/internal/shared"
 	"github.com/NVIDIA/k8s-nim-operator/internal/utils"
 )
@@ -304,144 +305,158 @@ func (r *NemoDatastoreReconciler) reconcileNemoDatastore(ctx context.Context, ne
 		return ctrl.Result{}, err
 	}
 
-	// Generate annotation for the current operator-version and apply to all resources
-	// Get generic name for all resources
 	namespacedName := types.NamespacedName{Name: nemoDatastore.GetName(), Namespace: nemoDatastore.GetNamespace()}
-
 	renderer := r.GetRenderer()
 
-	// Sync serviceaccount
-	err = r.renderAndSyncResource(ctx, nemoDatastore, &renderer, &corev1.ServiceAccount{}, func() (client.Object, error) {
-		return renderer.ServiceAccount(nemoDatastore.GetServiceAccountParams())
+	err = r.reconcileCoreResources(ctx, nemoDatastore, &renderer)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	err = r.reconcileConditionalResources(ctx, nemoDatastore, &renderer, namespacedName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	err = r.reconcileDeployment(ctx, nemoDatastore, &renderer, namespacedName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *NemoDatastoreReconciler) reconcileCoreResources(ctx context.Context, nemoDatastore *appsv1alpha1.NemoDatastore, renderer *render.Renderer) error {
+	err := r.renderAndSyncResource(ctx, nemoDatastore, renderer, &corev1.ServiceAccount{}, func() (client.Object, error) {
+		return (*renderer).ServiceAccount(nemoDatastore.GetServiceAccountParams())
 	}, "serviceaccount", conditions.ReasonServiceAccountFailed)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
-	// Sync role
-	err = r.renderAndSyncResource(ctx, nemoDatastore, &renderer, &rbacv1.Role{}, func() (client.Object, error) {
-		return renderer.Role(nemoDatastore.GetRoleParams())
+	err = r.renderAndSyncResource(ctx, nemoDatastore, renderer, &rbacv1.Role{}, func() (client.Object, error) {
+		return (*renderer).Role(nemoDatastore.GetRoleParams())
 	}, "role", conditions.ReasonRoleFailed)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
-	// Sync rolebinding
-	err = r.renderAndSyncResource(ctx, nemoDatastore, &renderer, &rbacv1.RoleBinding{}, func() (client.Object, error) {
-		return renderer.RoleBinding(nemoDatastore.GetRoleBindingParams())
+	err = r.renderAndSyncResource(ctx, nemoDatastore, renderer, &rbacv1.RoleBinding{}, func() (client.Object, error) {
+		return (*renderer).RoleBinding(nemoDatastore.GetRoleBindingParams())
 	}, "rolebinding", conditions.ReasonRoleBindingFailed)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
-	// Sync service
-	err = r.renderAndSyncResource(ctx, nemoDatastore, &renderer, &corev1.Service{}, func() (client.Object, error) {
-		return renderer.Service(nemoDatastore.GetServiceParams())
+	err = r.renderAndSyncResource(ctx, nemoDatastore, renderer, &corev1.Service{}, func() (client.Object, error) {
+		return (*renderer).Service(nemoDatastore.GetServiceParams())
 	}, "service", conditions.ReasonServiceFailed)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
-	// Sync ingress
-	if nemoDatastore.IsIngressEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoDatastore, &renderer, &networkingv1.Ingress{}, func() (client.Object, error) {
-			return renderer.Ingress(nemoDatastore.GetIngressParams())
-		}, "ingress", conditions.ReasonIngressFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	} else {
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &networkingv1.Ingress{}, namespacedName)
-		if err != nil && !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
+	return nil
+}
+
+func (r *NemoDatastoreReconciler) reconcileConditionalResources(ctx context.Context, nemoDatastore *appsv1alpha1.NemoDatastore, renderer *render.Renderer, namespacedName types.NamespacedName) error {
+	err := r.syncOrCleanupResource(ctx, nemoDatastore, renderer, nemoDatastore.IsIngressEnabled(),
+		&networkingv1.Ingress{}, func() (client.Object, error) {
+			return (*renderer).Ingress(nemoDatastore.GetIngressParams())
+		}, namespacedName, "ingress", conditions.ReasonIngressFailed, true)
+	if err != nil {
+		return err
 	}
 
-	// Sync HTTPRoute
-	if nemoDatastore.IsHTTPRouteEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoDatastore, &renderer, &gatewayv1.HTTPRoute{}, func() (client.Object, error) {
-			return renderer.HTTPRoute(nemoDatastore.GetHTTPRouteParams())
-		}, "httproute", conditions.ReasonHTTPRouteFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	} else {
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &gatewayv1.HTTPRoute{}, namespacedName)
-		if err != nil && !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
+	err = r.syncOrCleanupResource(ctx, nemoDatastore, renderer, nemoDatastore.IsHTTPRouteEnabled(),
+		&gatewayv1.HTTPRoute{}, func() (client.Object, error) {
+			return (*renderer).HTTPRoute(nemoDatastore.GetHTTPRouteParams())
+		}, namespacedName, "httproute", conditions.ReasonHTTPRouteFailed, true)
+	if err != nil {
+		return err
 	}
 
-	// Sync HPA
-	if nemoDatastore.IsAutoScalingEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoDatastore, &renderer, &autoscalingv2.HorizontalPodAutoscaler{}, func() (client.Object, error) {
-			return renderer.HPA(nemoDatastore.GetHPAParams())
-		}, "hpa", conditions.ReasonHPAFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	} else {
-		// If autoscaling is disabled, ensure the HPA is deleted
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &autoscalingv2.HorizontalPodAutoscaler{}, namespacedName)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
+	err = r.syncOrCleanupResource(ctx, nemoDatastore, renderer, nemoDatastore.IsAutoScalingEnabled(),
+		&autoscalingv2.HorizontalPodAutoscaler{}, func() (client.Object, error) {
+			return (*renderer).HPA(nemoDatastore.GetHPAParams())
+		}, namespacedName, "hpa", conditions.ReasonHPAFailed, false)
+	if err != nil {
+		return err
 	}
 
-	// Sync Service Monitor
 	if nemoDatastore.IsServiceMonitorEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoDatastore, &renderer, &monitoringv1.ServiceMonitor{}, func() (client.Object, error) {
-			return renderer.ServiceMonitor(nemoDatastore.GetServiceMonitorParams())
+		err = r.renderAndSyncResource(ctx, nemoDatastore, renderer, &monitoringv1.ServiceMonitor{}, func() (client.Object, error) {
+			return (*renderer).ServiceMonitor(nemoDatastore.GetServiceMonitorParams())
 		}, "servicemonitor", conditions.ReasonServiceMonitorFailed)
 		if err != nil {
-			return ctrl.Result{}, err
+			return err
 		}
 	}
 
-	deploymentParams := nemoDatastore.GetDeploymentParams()
+	return nil
+}
 
-	// Setup volume mounts with model store
+func (r *NemoDatastoreReconciler) syncOrCleanupResource(ctx context.Context, nemoDatastore *appsv1alpha1.NemoDatastore, renderer *render.Renderer, enabled bool, obj client.Object, renderFunc func() (client.Object, error), namespacedName types.NamespacedName, conditionType string, reason string, ignoreNotFoundOnCleanup bool) error {
+	if enabled {
+		return r.renderAndSyncResource(ctx, nemoDatastore, renderer, obj, renderFunc, conditionType, reason)
+	}
+	err := k8sutil.CleanupResource(ctx, r.GetClient(), obj, namespacedName)
+	if err != nil && (!ignoreNotFoundOnCleanup || !errors.IsNotFound(err)) {
+		return err
+	}
+	return nil
+}
+
+func (r *NemoDatastoreReconciler) reconcileDeployment(ctx context.Context, nemoDatastore *appsv1alpha1.NemoDatastore, renderer *render.Renderer, namespacedName types.NamespacedName) error {
+	logger := log.FromContext(ctx)
+
+	deploymentParams := nemoDatastore.GetDeploymentParams()
 	deploymentParams.Volumes = nemoDatastore.GetVolumes()
 	deploymentParams.VolumeMounts = nemoDatastore.GetVolumeMounts()
 
 	logger.Info("Reconciling", "volumes", nemoDatastore.GetVolumes())
 
-	// Sync deployment
-	err = r.renderAndSyncResource(ctx, nemoDatastore, &renderer, &appsv1.Deployment{}, func() (client.Object, error) {
-		result, err := renderer.Deployment(deploymentParams)
-		if err != nil {
-			return nil, err
-		}
-		initContainers := nemoDatastore.GetInitContainers()
-		if len(initContainers) > 0 {
-			result.Spec.Template.Spec.InitContainers = initContainers
-		}
-		fsGroup := ptr.To[int64](1000)
-		if nemoDatastore.Spec.GroupID != nil {
-			fsGroup = nemoDatastore.Spec.GroupID
-		}
-		result.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
-			FSGroup: fsGroup,
-		}
-		return result, nil
+	err := r.renderAndSyncResource(ctx, nemoDatastore, renderer, &appsv1.Deployment{}, func() (client.Object, error) {
+		return r.buildDeployment(renderer, nemoDatastore, deploymentParams)
 	}, "deployment", conditions.ReasonDeploymentFailed)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
-	// Wait for deployment
+	return r.updateDeploymentStatus(ctx, nemoDatastore, namespacedName)
+}
+
+func (r *NemoDatastoreReconciler) buildDeployment(renderer *render.Renderer, nemoDatastore *appsv1alpha1.NemoDatastore, deploymentParams *rendertypes.DeploymentParams) (client.Object, error) {
+	result, err := (*renderer).Deployment(deploymentParams)
+	if err != nil {
+		return nil, err
+	}
+	initContainers := nemoDatastore.GetInitContainers()
+	if len(initContainers) > 0 {
+		result.Spec.Template.Spec.InitContainers = initContainers
+	}
+	fsGroup := ptr.To[int64](1000)
+	if nemoDatastore.Spec.GroupID != nil {
+		fsGroup = nemoDatastore.Spec.GroupID
+	}
+	result.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
+		FSGroup: fsGroup,
+	}
+	return result, nil
+}
+
+func (r *NemoDatastoreReconciler) updateDeploymentStatus(ctx context.Context, nemoDatastore *appsv1alpha1.NemoDatastore, namespacedName types.NamespacedName) error {
+	logger := log.FromContext(ctx)
+
 	msg, ready, err := k8sutil.IsDeploymentReady(ctx, r.GetClient(), &namespacedName)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
 	if !ready {
-		// Update status as NotReady
 		err = r.updater.SetConditionsNotReady(ctx, nemoDatastore, conditions.NotReady, msg)
 		r.GetEventRecorder().Eventf(nemoDatastore, corev1.EventTypeNormal, conditions.NotReady,
 			"NemoDatastore %s not ready yet, msg: %s", nemoDatastore.Name, msg)
 	} else {
-		// Update status as ready
 		err = r.updater.SetConditionsReady(ctx, nemoDatastore, conditions.Ready, msg)
 		r.GetEventRecorder().Eventf(nemoDatastore, corev1.EventTypeNormal, conditions.Ready,
 			"NemoDatastore %s ready, msg: %s", nemoDatastore.Name, msg)
@@ -449,10 +464,10 @@ func (r *NemoDatastoreReconciler) reconcileNemoDatastore(ctx context.Context, ne
 
 	if err != nil {
 		logger.Error(err, "Unable to update status")
-		return ctrl.Result{}, err
+		return err
 	}
 
-	return ctrl.Result{}, nil
+	return nil
 }
 
 func (r *NemoDatastoreReconciler) reconcilePVC(ctx context.Context, nemoDatastore *appsv1alpha1.NemoDatastore) error {
