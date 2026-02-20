@@ -1757,47 +1757,53 @@ func (n *NIMService) GetInferenceServicePorts(modeType kserveconstants.Deploymen
 	return ports
 }
 
+// resolveMetricTarget extracts the target value from an autoscaling MetricTarget.
+func resolveMetricTarget(target autoscalingv2.MetricTarget) int32 {
+	switch target.Type {
+	case autoscalingv2.UtilizationMetricType:
+		if target.AverageUtilization != nil {
+			return *target.AverageUtilization
+		}
+	case autoscalingv2.ValueMetricType:
+		if target.Value != nil {
+			return int32(target.Value.Value())
+		}
+	case autoscalingv2.AverageValueMetricType:
+		if target.AverageValue != nil {
+			return int32(target.AverageValue.Value())
+		}
+	}
+	return 0
+}
+
+// findResourceMetric finds the first CPU or Memory resource metric and returns its name, type, and target value.
+func findResourceMetric(metrics []autoscalingv2.MetricSpec) (string, string, int32) {
+	for _, m := range metrics {
+		if m.Type != autoscalingv2.ResourceMetricSourceType || m.Resource == nil {
+			continue
+		}
+		if m.Resource.Name != corev1.ResourceCPU && m.Resource.Name != corev1.ResourceMemory {
+			continue
+		}
+		metric := string(m.Resource.Name)
+		metricType := string(m.Resource.Target.Type)
+		target := resolveMetricTarget(m.Resource.Target)
+		return metric, metricType, target
+	}
+	return "", "", 0
+}
+
 // GetInferenceServiceHPAParams returns the HPA spec for the NIMService deployment.
 func (n *NIMService) GetInferenceServiceHPAParams() (*int32, int32, string, string, int32) {
 	hpa := n.GetHPA()
 
 	var minReplicas *int32
-	var maxReplicas int32
-	var metric string
-	var metricType string
-	var target int32
-
 	if hpa.MinReplicas != nil {
 		minReplicas = hpa.MinReplicas
 	}
-	maxReplicas = hpa.MaxReplicas
 
-	for _, m := range hpa.Metrics {
-		if m.Type == autoscalingv2.ResourceMetricSourceType && m.Resource != nil {
-			if m.Resource.Name == corev1.ResourceCPU || m.Resource.Name == corev1.ResourceMemory {
-				metric = string(m.Resource.Name)
-				metricType = string(m.Resource.Target.Type)
-
-				switch m.Resource.Target.Type {
-				case autoscalingv2.UtilizationMetricType:
-					if m.Resource.Target.AverageUtilization != nil {
-						target = *m.Resource.Target.AverageUtilization
-					}
-				case autoscalingv2.ValueMetricType:
-					if m.Resource.Target.Value != nil {
-						target = int32((*m.Resource.Target.Value).Value())
-					}
-				case autoscalingv2.AverageValueMetricType:
-					if m.Resource.Target.AverageValue != nil {
-						target = int32((*m.Resource.Target.AverageValue).Value())
-					}
-				}
-				break
-			}
-		}
-	}
-
-	return minReplicas, maxReplicas, metric, metricType, target
+	metric, metricType, target := findResourceMetric(hpa.Metrics)
+	return minReplicas, hpa.MaxReplicas, metric, metricType, target
 }
 
 func (n *NIMService) GetMultiNodeTensorParallelism() uint32 {
