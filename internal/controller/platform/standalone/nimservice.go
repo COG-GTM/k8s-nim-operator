@@ -258,7 +258,7 @@ func (r *NIMServiceReconciler) reconcileBaseResources(ctx context.Context, nimSe
 
 func (r *NIMServiceReconciler) reconcileIngress(ctx context.Context, nimService *appsv1alpha1.NIMService, renderer render.Renderer, namespacedName types.NamespacedName) error {
 	if nimService.IsIngressEnabled() {
-		return r.renderAndSyncResource(ctx, nimService, &renderer,&networkingv1.Ingress{}, func() (client.Object, error) {
+		return r.renderAndSyncResource(ctx, nimService, &renderer, &networkingv1.Ingress{}, func() (client.Object, error) {
 			return renderer.Ingress(nimService.GetIngressParams())
 		}, "ingress", conditions.ReasonIngressFailed)
 	}
@@ -271,7 +271,7 @@ func (r *NIMServiceReconciler) reconcileIngress(ctx context.Context, nimService 
 
 func (r *NIMServiceReconciler) reconcileHTTPRoute(ctx context.Context, nimService *appsv1alpha1.NIMService, renderer render.Renderer, namespacedName types.NamespacedName) error {
 	if nimService.IsHTTPRouteEnabled() {
-		return r.renderAndSyncResource(ctx, nimService, &renderer,&gatewayv1.HTTPRoute{}, func() (client.Object, error) {
+		return r.renderAndSyncResource(ctx, nimService, &renderer, &gatewayv1.HTTPRoute{}, func() (client.Object, error) {
 			return renderer.HTTPRoute(nimService.GetHTTPRouteParams())
 		}, "httproute", conditions.ReasonHTTPRouteFailed)
 	}
@@ -284,7 +284,7 @@ func (r *NIMServiceReconciler) reconcileHTTPRoute(ctx context.Context, nimServic
 
 func (r *NIMServiceReconciler) reconcileHPA(ctx context.Context, nimService *appsv1alpha1.NIMService, renderer render.Renderer, namespacedName types.NamespacedName) error {
 	if nimService.IsAutoScalingEnabled() {
-		return r.renderAndSyncResource(ctx, nimService, &renderer,&autoscalingv2.HorizontalPodAutoscaler{}, func() (client.Object, error) {
+		return r.renderAndSyncResource(ctx, nimService, &renderer, &autoscalingv2.HorizontalPodAutoscaler{}, func() (client.Object, error) {
 			return renderer.HPA(nimService.GetHPAParams())
 		}, "hpa", conditions.ReasonHPAFailed)
 	}
@@ -295,7 +295,7 @@ func (r *NIMServiceReconciler) reconcileServiceMonitor(ctx context.Context, nimS
 	if !nimService.IsServiceMonitorEnabled() {
 		return nil
 	}
-	return r.renderAndSyncResource(ctx, nimService, &renderer,&monitoringv1.ServiceMonitor{}, func() (client.Object, error) {
+	return r.renderAndSyncResource(ctx, nimService, &renderer, &monitoringv1.ServiceMonitor{}, func() (client.Object, error) {
 		return renderer.ServiceMonitor(nimService.GetServiceMonitorParams())
 	}, "servicemonitor", conditions.ReasonServiceMonitorFailed)
 }
