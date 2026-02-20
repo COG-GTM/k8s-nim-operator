@@ -259,94 +259,110 @@ func (r *NIMServiceReconciler) renderAndSyncCache(ctx context.Context,
 	nimService *appsv1alpha1.NIMService) (*appsv1alpha1.PersistentVolumeClaim, string, *appsv1alpha1.NIMCache, error) {
 	logger := r.log
 
-	var modelPVC *appsv1alpha1.PersistentVolumeClaim
-	modelProfile := ""
-
-	// Select PVC for model store
 	nimCacheName := nimService.GetNIMCacheName()
+	if nimCacheName != "" {
+		return r.resolveNIMCachePVC(ctx, nimService, nimCacheName)
+	}
+
 	nimCache := &appsv1alpha1.NIMCache{}
-	if nimCacheName != "" { // nolint:gocritic
-		if err := r.Get(ctx, types.NamespacedName{Name: nimCacheName, Namespace: nimService.GetNamespace()}, nimCache); err != nil {
-			// Fail the NIMService if the NIMCache is not found
-			if k8serrors.IsNotFound(err) {
-				msg := fmt.Sprintf("NIMCache %s not found", nimCacheName)
-				statusUpdateErr := r.updater.SetConditionsFailed(ctx, nimService, conditions.ReasonNIMCacheNotFound, msg)
-				r.recorder.Eventf(nimService, corev1.EventTypeWarning, conditions.Failed, msg)
-				logger.Info(msg, "nimcache", nimCacheName, "nimservice", nimService.Name)
-				if statusUpdateErr != nil {
-					logger.Error(statusUpdateErr, "failed to update status", "nimservice", nimService.Name)
-					return nil, "", nil, statusUpdateErr
-				}
-				return nil, "", nil, nil
-			}
-			return nil, "", nil, err
-		}
 
-		switch nimCache.Status.State {
-		case appsv1alpha1.NimCacheStatusReady:
-			logger.V(4).Info("NIMCache is ready", "nimcache", nimCacheName, "nimservice", nimService.Name)
-		case appsv1alpha1.NimCacheStatusFailed:
-			var msg string
-			cond := meta.FindStatusCondition(nimCache.Status.Conditions, conditions.Failed)
-			if cond != nil && cond.Status == metav1.ConditionTrue {
-				msg = cond.Message
-			} else {
-				msg = ""
-			}
-			err := r.updater.SetConditionsFailed(ctx, nimService, conditions.ReasonNIMCacheFailed, msg)
-			r.recorder.Eventf(nimService, corev1.EventTypeWarning, conditions.Failed, msg)
-			logger.Info(msg, "nimcache", nimCacheName, "nimservice", nimService.Name)
-			if err != nil {
-				logger.Error(err, "failed to update status", "nimservice", nimService.Name)
-			}
-			return nil, "", nil, err
-		default:
-			msg := fmt.Sprintf("NIMCache %s not ready", nimCacheName)
-			err := r.updater.SetConditionsNotReady(ctx, nimService, conditions.ReasonNIMCacheNotReady, msg)
-			r.recorder.Eventf(nimService, corev1.EventTypeNormal, conditions.NotReady,
-				"NIMService %s not ready yet, msg: %s", nimService.Name, msg)
-			logger.V(4).Info(msg, "nimservice", nimService.Name)
-			if err != nil {
-				logger.Error(err, "failed to update status", "nimservice", nimService.Name)
-			}
-			return nil, "", nil, err
-		}
-
-		// Fetch PVC for the associated NIMCache instance and mount it
-		if nimCache.Status.PVC == "" {
-			err := fmt.Errorf("missing PVC for the nimcache instance %s", nimCache.GetName())
-			logger.Error(err, "unable to obtain pvc backing the nimcache instance")
-			return nil, "", nil, err
-		}
-		if nimCache.Spec.Storage.PVC.Name == "" {
-			nimCache.Spec.Storage.PVC.Name = nimCache.Status.PVC
-		}
-		// Get the underlying PVC for the NIMCache instance
-		modelPVC = &nimCache.Spec.Storage.PVC
-		logger.V(2).Info("obtained the backing pvc for nimcache instance", "pvc", modelPVC)
-
-		if profile := nimService.GetNIMCacheProfile(); profile != "" {
-			logger.Info("overriding model profile", "profile", profile)
-			modelProfile = profile
-		}
-	} else if nimService.Spec.Storage.PVC.Create != nil && *nimService.Spec.Storage.PVC.Create {
-		// Create a new PVC
-		var err error
-		modelPVC, err = r.reconcilePVC(ctx, nimService)
+	if nimService.Spec.Storage.PVC.Create != nil && *nimService.Spec.Storage.PVC.Create {
+		modelPVC, err := r.reconcilePVC(ctx, nimService)
 		if err != nil {
 			logger.Error(err, "unable to create pvc")
 			return nil, "", nil, err
 		}
-	} else if nimService.Spec.Storage.PVC.Name != "" {
-		// Use an existing PVC
-		modelPVC = &nimService.Spec.Storage.PVC
-	} else {
-		err := fmt.Errorf("neither external PVC name or NIMCache volume is provided")
-		logger.Error(err, "failed to determine PVC for model-store")
+		return modelPVC, "", nimCache, nil
+	}
+
+	if nimService.Spec.Storage.PVC.Name != "" {
+		return &nimService.Spec.Storage.PVC, "", nimCache, nil
+	}
+
+	err := fmt.Errorf("neither external PVC name or NIMCache volume is provided")
+	logger.Error(err, "failed to determine PVC for model-store")
+	return nil, "", nil, err
+}
+
+func (r *NIMServiceReconciler) resolveNIMCachePVC(ctx context.Context,
+	nimService *appsv1alpha1.NIMService, nimCacheName string) (*appsv1alpha1.PersistentVolumeClaim, string, *appsv1alpha1.NIMCache, error) {
+	logger := r.log
+
+	nimCache := &appsv1alpha1.NIMCache{}
+	if err := r.Get(ctx, types.NamespacedName{Name: nimCacheName, Namespace: nimService.GetNamespace()}, nimCache); err != nil {
+		if k8serrors.IsNotFound(err) {
+			msg := fmt.Sprintf("NIMCache %s not found", nimCacheName)
+			statusUpdateErr := r.updater.SetConditionsFailed(ctx, nimService, conditions.ReasonNIMCacheNotFound, msg)
+			r.recorder.Eventf(nimService, corev1.EventTypeWarning, conditions.Failed, msg)
+			logger.Info(msg, "nimcache", nimCacheName, "nimservice", nimService.Name)
+			if statusUpdateErr != nil {
+				logger.Error(statusUpdateErr, "failed to update status", "nimservice", nimService.Name)
+				return nil, "", nil, statusUpdateErr
+			}
+			return nil, "", nil, nil
+		}
 		return nil, "", nil, err
 	}
 
+	ready, err := r.validateNIMCacheState(ctx, nimService, nimCache, nimCacheName)
+	if !ready {
+		return nil, "", nil, err
+	}
+
+	if nimCache.Status.PVC == "" {
+		pvcErr := fmt.Errorf("missing PVC for the nimcache instance %s", nimCache.GetName())
+		logger.Error(pvcErr, "unable to obtain pvc backing the nimcache instance")
+		return nil, "", nil, pvcErr
+	}
+	if nimCache.Spec.Storage.PVC.Name == "" {
+		nimCache.Spec.Storage.PVC.Name = nimCache.Status.PVC
+	}
+	modelPVC := &nimCache.Spec.Storage.PVC
+	logger.V(2).Info("obtained the backing pvc for nimcache instance", "pvc", modelPVC)
+
+	modelProfile := ""
+	if profile := nimService.GetNIMCacheProfile(); profile != "" {
+		logger.Info("overriding model profile", "profile", profile)
+		modelProfile = profile
+	}
+
 	return modelPVC, modelProfile, nimCache, nil
+}
+
+func (r *NIMServiceReconciler) validateNIMCacheState(ctx context.Context,
+	nimService *appsv1alpha1.NIMService, nimCache *appsv1alpha1.NIMCache, nimCacheName string) (bool, error) {
+	logger := r.log
+
+	switch nimCache.Status.State {
+	case appsv1alpha1.NimCacheStatusReady:
+		logger.V(4).Info("NIMCache is ready", "nimcache", nimCacheName, "nimservice", nimService.Name)
+		return true, nil
+	case appsv1alpha1.NimCacheStatusFailed:
+		var msg string
+		cond := meta.FindStatusCondition(nimCache.Status.Conditions, conditions.Failed)
+		if cond != nil && cond.Status == metav1.ConditionTrue {
+			msg = cond.Message
+		} else {
+			msg = ""
+		}
+		err := r.updater.SetConditionsFailed(ctx, nimService, conditions.ReasonNIMCacheFailed, msg)
+		r.recorder.Eventf(nimService, corev1.EventTypeWarning, conditions.Failed, msg)
+		logger.Info(msg, "nimcache", nimCacheName, "nimservice", nimService.Name)
+		if err != nil {
+			logger.Error(err, "failed to update status", "nimservice", nimService.Name)
+		}
+		return false, err
+	default:
+		msg := fmt.Sprintf("NIMCache %s not ready", nimCacheName)
+		err := r.updater.SetConditionsNotReady(ctx, nimService, conditions.ReasonNIMCacheNotReady, msg)
+		r.recorder.Eventf(nimService, corev1.EventTypeNormal, conditions.NotReady,
+			"NIMService %s not ready yet, msg: %s", nimService.Name, msg)
+		logger.V(4).Info(msg, "nimservice", nimService.Name)
+		if err != nil {
+			logger.Error(err, "failed to update status", "nimservice", nimService.Name)
+		}
+		return false, err
+	}
 }
 
 func (r *NIMServiceReconciler) reconcilePVC(ctx context.Context, nimService *appsv1alpha1.NIMService) (*appsv1alpha1.PersistentVolumeClaim, error) {
