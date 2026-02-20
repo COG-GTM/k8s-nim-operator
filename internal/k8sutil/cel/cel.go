@@ -81,6 +81,66 @@ func (vt ValueType) CELType() *celgo.Type {
 	return nil
 }
 
+func buildBoolExpr(key string, op ComparisonOperator, value interface{}) (string, error) {
+	b, ok := value.(bool)
+	if !ok {
+		return "", nil
+	}
+	comp, ok := boolOperators[op]
+	if !ok {
+		return "", fmt.Errorf("invalid operator %q for bool type", op)
+	}
+	return fmt.Sprintf("%s %s %t", key, comp, b), nil
+}
+
+func buildIntExpr(key string, op ComparisonOperator, value interface{}) (string, error) {
+	num, ok := value.(int)
+	if !ok {
+		return "", nil
+	}
+	comp, ok := intOperators[op]
+	if !ok {
+		return "", fmt.Errorf("invalid operator %q for int type", op)
+	}
+	return fmt.Sprintf("%s %s %d", key, comp, num), nil
+}
+
+func buildStringExpr(key string, op ComparisonOperator, value interface{}) (string, error) {
+	str, ok := value.(string)
+	if !ok {
+		return "", nil
+	}
+	comp, ok := stringOperators[op]
+	if !ok {
+		return "", fmt.Errorf("invalid operator %q for string type", op)
+	}
+	return fmt.Sprintf("%s %s %q", key, comp, str), nil
+}
+
+func buildSemverExpr(key string, op ComparisonOperator, value interface{}) (string, error) {
+	str, ok := value.(string)
+	if !ok {
+		return "", nil
+	}
+	comp, ok := semverOperators[op]
+	if !ok {
+		return "", fmt.Errorf("invalid operator %q for semver type", op)
+	}
+	return fmt.Sprintf("(%s).compareTo(semver(%q)) %s", key, str, comp), nil
+}
+
+func buildQuantityExpr(key string, op ComparisonOperator, value interface{}) (string, error) {
+	quantity, ok := value.(*resource.Quantity)
+	if !ok {
+		return "", nil
+	}
+	comp, ok := quantityOperators[op]
+	if !ok {
+		return "", fmt.Errorf("invalid operator %q for quantity type", op)
+	}
+	return fmt.Sprintf("(%s).compareTo(quantity(%q)) %s", key, quantity.String(), comp), nil
+}
+
 // BuildExpr returns a CEL expression given key, operator, value, and type.
 // Examples:
 // BuildExpr("foo", OpEqual, true, TypeBool) => "foo == true"
@@ -93,47 +153,21 @@ func BuildExpr(key string, op ComparisonOperator, value interface{}, vt ValueTyp
 	}
 
 	var expr string
+	var err error
 	switch vt {
 	case TypeBool:
-		if b, ok := value.(bool); ok {
-			comp, ok := boolOperators[op]
-			if !ok {
-				return "", fmt.Errorf("invalid operator %q for bool type", op)
-			}
-			expr = fmt.Sprintf("%s %s %t", key, comp, b)
-		}
+		expr, err = buildBoolExpr(key, op, value)
 	case TypeInt:
-		if num, ok := value.(int); ok {
-			comp, ok := intOperators[op]
-			if !ok {
-				return "", fmt.Errorf("invalid operator %q for int type", op)
-			}
-			expr = fmt.Sprintf("%s %s %d", key, comp, num)
-		}
+		expr, err = buildIntExpr(key, op, value)
 	case TypeString:
-		if str, ok := value.(string); ok {
-			comp, ok := stringOperators[op]
-			if !ok {
-				return "", fmt.Errorf("invalid operator %q for string type", op)
-			}
-			expr = fmt.Sprintf("%s %s %q", key, comp, str)
-		}
+		expr, err = buildStringExpr(key, op, value)
 	case TypeSemver:
-		if str, ok := value.(string); ok {
-			comp, ok := semverOperators[op]
-			if !ok {
-				return "", fmt.Errorf("invalid operator %q for semver type", op)
-			}
-			expr = fmt.Sprintf("(%s).compareTo(semver(%q)) %s", key, str, comp)
-		}
+		expr, err = buildSemverExpr(key, op, value)
 	case TypeQuantity:
-		if quantity, ok := value.(*resource.Quantity); ok {
-			comp, ok := quantityOperators[op]
-			if !ok {
-				return "", fmt.Errorf("invalid operator %q for quantity type", op)
-			}
-			expr = fmt.Sprintf("(%s).compareTo(quantity(%q)) %s", key, quantity.String(), comp)
-		}
+		expr, err = buildQuantityExpr(key, op, value)
+	}
+	if err != nil {
+		return "", err
 	}
 	if expr == "" {
 		return "", fmt.Errorf("invalid value type %q", vt)
