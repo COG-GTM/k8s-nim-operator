@@ -295,138 +295,153 @@ func (r *NemoGuardrailReconciler) reconcileNemoGuardrail(ctx context.Context, ne
 				"NemoGuardrail %s failed, msg: %s", nemoGuardrail.Name, err.Error())
 		}
 	}()
-	// Generate annotation for the current operator-version and apply to all resources
-	// Get generic name for all resources
-	namespacedName := types.NamespacedName{Name: nemoGuardrail.GetName(), Namespace: nemoGuardrail.GetNamespace()}
 
+	namespacedName := types.NamespacedName{Name: nemoGuardrail.GetName(), Namespace: nemoGuardrail.GetNamespace()}
 	renderer := r.GetRenderer()
 
-	// Sync serviceaccount
-	err = r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &corev1.ServiceAccount{}, func() (client.Object, error) {
-		return renderer.ServiceAccount(nemoGuardrail.GetServiceAccountParams())
-	}, "serviceaccount", conditions.ReasonServiceAccountFailed)
-	if err != nil {
+	if err = r.reconcileBaseResources(ctx, nemoGuardrail, renderer); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Sync role
+	if err = r.reconcileNetworkResources(ctx, nemoGuardrail, renderer, namespacedName); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err = r.reconcileScalingAndMonitoring(ctx, nemoGuardrail, renderer, namespacedName); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err = r.reconcileDatabaseSecret(ctx, nemoGuardrail, renderer); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err = r.reconcileGuardrailDeployment(ctx, nemoGuardrail, renderer, logger); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	err = r.updateNemoGuardrailStatus(ctx, nemoGuardrail, namespacedName, logger)
+	return ctrl.Result{}, err
+}
+
+func (r *NemoGuardrailReconciler) reconcileBaseResources(ctx context.Context, nemoGuardrail *appsv1alpha1.NemoGuardrail, renderer render.Renderer) error {
+	err := r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &corev1.ServiceAccount{}, func() (client.Object, error) {
+		return renderer.ServiceAccount(nemoGuardrail.GetServiceAccountParams())
+	}, "serviceaccount", conditions.ReasonServiceAccountFailed)
+	if err != nil {
+		return err
+	}
+
 	err = r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &rbacv1.Role{}, func() (client.Object, error) {
 		return renderer.Role(nemoGuardrail.GetRoleParams())
 	}, "role", conditions.ReasonRoleFailed)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
-	// Sync rolebinding
 	err = r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &rbacv1.RoleBinding{}, func() (client.Object, error) {
 		return renderer.RoleBinding(nemoGuardrail.GetRoleBindingParams())
 	}, "rolebinding", conditions.ReasonRoleBindingFailed)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
-	// Sync ConfigStore PVC
 	if nemoGuardrail.Spec.ConfigStore.PVC != nil {
 		if err = r.reconcilePVC(ctx, nemoGuardrail); err != nil {
-			return ctrl.Result{}, err
+			return err
 		}
 	}
-	// Sync service
-	err = r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &corev1.Service{}, func() (client.Object, error) {
+
+	return r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &corev1.Service{}, func() (client.Object, error) {
 		return renderer.Service(nemoGuardrail.GetServiceParams())
 	}, "service", conditions.ReasonServiceFailed)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+}
 
-	// Sync ingress
+func (r *NemoGuardrailReconciler) reconcileNetworkResources(ctx context.Context, nemoGuardrail *appsv1alpha1.NemoGuardrail, renderer render.Renderer, namespacedName types.NamespacedName) error {
 	if nemoGuardrail.IsIngressEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &networkingv1.Ingress{}, func() (client.Object, error) {
+		err := r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &networkingv1.Ingress{}, func() (client.Object, error) {
 			return renderer.Ingress(nemoGuardrail.GetIngressParams())
 		}, "ingress", conditions.ReasonIngressFailed)
 		if err != nil {
-			return ctrl.Result{}, err
+			return err
 		}
 	} else {
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &networkingv1.Ingress{}, namespacedName)
+		err := k8sutil.CleanupResource(ctx, r.GetClient(), &networkingv1.Ingress{}, namespacedName)
 		if err != nil && !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
+			return err
 		}
 	}
 
-	// Sync HTTPRoute
 	if nemoGuardrail.IsHTTPRouteEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &gatewayv1.HTTPRoute{}, func() (client.Object, error) {
+		err := r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &gatewayv1.HTTPRoute{}, func() (client.Object, error) {
 			return renderer.HTTPRoute(nemoGuardrail.GetHTTPRouteParams())
 		}, "httproute", conditions.ReasonHTTPRouteFailed)
 		if err != nil {
-			return ctrl.Result{}, err
+			return err
 		}
 	} else {
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &gatewayv1.HTTPRoute{}, namespacedName)
+		err := k8sutil.CleanupResource(ctx, r.GetClient(), &gatewayv1.HTTPRoute{}, namespacedName)
 		if err != nil && !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
+			return err
 		}
 	}
 
-	// Sync HPA
+	return nil
+}
+
+func (r *NemoGuardrailReconciler) reconcileScalingAndMonitoring(ctx context.Context, nemoGuardrail *appsv1alpha1.NemoGuardrail, renderer render.Renderer, namespacedName types.NamespacedName) error {
 	if nemoGuardrail.IsAutoScalingEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &autoscalingv2.HorizontalPodAutoscaler{}, func() (client.Object, error) {
+		err := r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &autoscalingv2.HorizontalPodAutoscaler{}, func() (client.Object, error) {
 			return renderer.HPA(nemoGuardrail.GetHPAParams())
 		}, "hpa", conditions.ReasonHPAFailed)
 		if err != nil {
-			return ctrl.Result{}, err
+			return err
 		}
 	} else {
-		// If autoscaling is disabled, ensure the HPA is deleted
-		err = k8sutil.CleanupResource(ctx, r.GetClient(), &autoscalingv2.HorizontalPodAutoscaler{}, namespacedName)
+		err := k8sutil.CleanupResource(ctx, r.GetClient(), &autoscalingv2.HorizontalPodAutoscaler{}, namespacedName)
 		if err != nil {
-			return ctrl.Result{}, err
+			return err
 		}
 	}
 
-	// Sync Service Monitor
 	if nemoGuardrail.IsServiceMonitorEnabled() {
-		err = r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &monitoringv1.ServiceMonitor{}, func() (client.Object, error) {
+		return r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &monitoringv1.ServiceMonitor{}, func() (client.Object, error) {
 			return renderer.ServiceMonitor(nemoGuardrail.GetServiceMonitorParams())
 		}, "servicemonitor", conditions.ReasonServiceMonitorFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
 	}
 
-	if nemoGuardrail.Spec.DatabaseConfig != nil {
-		secretValue, err := r.getValueFromSecret(ctx, nemoGuardrail.GetNamespace(), nemoGuardrail.Spec.DatabaseConfig.Credentials.SecretName, nemoGuardrail.Spec.DatabaseConfig.Credentials.PasswordKey)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		data := nemoGuardrail.GeneratePostgresConnString(secretValue)
-		// Encode to base64
-		encoded := base64.StdEncoding.EncodeToString([]byte(data))
+	return nil
+}
 
-		secretMapData := map[string]string{
-			"uri": encoded,
-		}
-
-		// Sync Evaluator Secret
-		err = r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &corev1.Secret{}, func() (client.Object, error) {
-			return renderer.Secret(nemoGuardrail.GetSecretParams(secretMapData))
-		}, "secret", conditions.ReasonSecretFailed)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
+func (r *NemoGuardrailReconciler) reconcileDatabaseSecret(ctx context.Context, nemoGuardrail *appsv1alpha1.NemoGuardrail, renderer render.Renderer) error {
+	if nemoGuardrail.Spec.DatabaseConfig == nil {
+		return nil
 	}
 
+	secretValue, err := r.getValueFromSecret(ctx, nemoGuardrail.GetNamespace(), nemoGuardrail.Spec.DatabaseConfig.Credentials.SecretName, nemoGuardrail.Spec.DatabaseConfig.Credentials.PasswordKey)
+	if err != nil {
+		return err
+	}
+
+	data := nemoGuardrail.GeneratePostgresConnString(secretValue)
+	encoded := base64.StdEncoding.EncodeToString([]byte(data))
+
+	secretMapData := map[string]string{
+		"uri": encoded,
+	}
+
+	return r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &corev1.Secret{}, func() (client.Object, error) {
+		return renderer.Secret(nemoGuardrail.GetSecretParams(secretMapData))
+	}, "secret", conditions.ReasonSecretFailed)
+}
+
+func (r *NemoGuardrailReconciler) reconcileGuardrailDeployment(ctx context.Context, nemoGuardrail *appsv1alpha1.NemoGuardrail, renderer render.Renderer, logger logr.Logger) error {
 	deploymentParams := nemoGuardrail.GetDeploymentParams()
-
-	// Setup volume mounts with model store
 	deploymentParams.Volumes = nemoGuardrail.GetVolumes()
 	deploymentParams.VolumeMounts = nemoGuardrail.GetVolumeMounts()
 
 	logger.Info("Reconciling", "volumes", nemoGuardrail.GetVolumes())
 
-	// Sync deployment
-	err = r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &appsv1.Deployment{}, func() (client.Object, error) {
+	return r.renderAndSyncResource(ctx, nemoGuardrail, &renderer, &appsv1.Deployment{}, func() (client.Object, error) {
 		result, err := renderer.Deployment(deploymentParams)
 		if err != nil {
 			return nil, err
@@ -439,23 +454,19 @@ func (r *NemoGuardrailReconciler) reconcileNemoGuardrail(ctx context.Context, ne
 		}
 		return result, err
 	}, "deployment", conditions.ReasonDeploymentFailed)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+}
 
-	// Wait for deployment
+func (r *NemoGuardrailReconciler) updateNemoGuardrailStatus(ctx context.Context, nemoGuardrail *appsv1alpha1.NemoGuardrail, namespacedName types.NamespacedName, logger logr.Logger) error {
 	msg, ready, err := k8sutil.IsDeploymentReady(ctx, r.GetClient(), &namespacedName)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
 	if !ready {
-		// Update status as NotReady
 		err = r.updater.SetConditionsNotReady(ctx, nemoGuardrail, conditions.NotReady, msg)
 		r.GetEventRecorder().Eventf(nemoGuardrail, corev1.EventTypeNormal, conditions.NotReady,
 			"NemoGuardrail %s not ready yet, msg: %s", nemoGuardrail.Name, msg)
 	} else {
-		// Update status as ready
 		err = r.updater.SetConditionsReady(ctx, nemoGuardrail, conditions.Ready, msg)
 		r.GetEventRecorder().Eventf(nemoGuardrail, corev1.EventTypeNormal, conditions.Ready,
 			"NemoGuardrail %s ready, msg: %s", nemoGuardrail.Name, msg)
@@ -463,10 +474,10 @@ func (r *NemoGuardrailReconciler) reconcileNemoGuardrail(ctx context.Context, ne
 
 	if err != nil {
 		logger.Error(err, "Unable to update status")
-		return ctrl.Result{}, err
+		return err
 	}
 
-	return ctrl.Result{}, nil
+	return nil
 }
 
 func (r *NemoGuardrailReconciler) reconcilePVC(ctx context.Context, nemoGuardrail *appsv1alpha1.NemoGuardrail) error {
